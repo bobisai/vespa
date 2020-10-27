@@ -42,6 +42,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * @author freva
@@ -66,7 +67,7 @@ public class DynamicDockerProvisionTest {
         ApplicationId application1 = ProvisioningTester.makeApplicationId();
         NodeResources flavor = new NodeResources(1, 4, 10, 1);
 
-        mockHostProvisioner(hostProvisioner, tester.nodeRepository().flavors().getFlavorOrThrow("small"));
+        mockHostProvisioner(hostProvisioner, "small", 1, null);
         List<HostSpec> hostSpec = tester.prepare(application1, clusterSpec("myContent.t1.a1"), 4, 1, flavor);
         verify(hostProvisioner).provisionHosts(List.of(100, 101, 102, 103), flavor, application1, Version.emptyVersion);
 
@@ -84,7 +85,7 @@ public class DynamicDockerProvisionTest {
         NodeResources flavor = new NodeResources(1, 4, 10, 1);
 
         List<Integer> expectedProvisionIndexes = List.of(100, 101);
-        mockHostProvisioner(hostProvisioner, tester.nodeRepository().flavors().getFlavorOrThrow("large"));
+        mockHostProvisioner(hostProvisioner, "large");
         tester.prepare(application, clusterSpec("myContent.t2.a2"), 2, 1, flavor);
         verify(hostProvisioner).provisionHosts(expectedProvisionIndexes, flavor, application, Version.emptyVersion);
 
@@ -98,7 +99,7 @@ public class DynamicDockerProvisionTest {
         }
         tester.activateTenantHosts();
 
-        mockHostProvisioner(hostProvisioner, tester.nodeRepository().flavors().getFlavorOrThrow("small"));
+        mockHostProvisioner(hostProvisioner, "small");
         tester.prepare(application, clusterSpec("another-id"), 2, 1, flavor);
         // Verify there was only 1 call to provision hosts (during the first prepare)
         verify(hostProvisioner).provisionHosts(any(), any(), any(), any());
@@ -338,12 +339,31 @@ public class DynamicDockerProvisionTest {
     }
 
     @SuppressWarnings("unchecked")
-    private static void mockHostProvisioner(HostProvisioner hostProvisioner, Flavor hostFlavor) {
+    private void mockHostProvisioner(HostProvisioner hostProvisioner, String hostFlavorName, int numIps, ApplicationId exclusiveTo) {
         doAnswer(invocation -> {
+            Flavor hostFlavor = tester.nodeRepository().flavors().getFlavorOrThrow(hostFlavorName);
             List<Integer> provisionIndexes = (List<Integer>) invocation.getArguments()[0];
             NodeResources nodeResources = (NodeResources) invocation.getArguments()[1];
+
             return provisionIndexes.stream()
-                    .map(i -> new ProvisionedHost("id-" + i, "host-" + i, hostFlavor, "host-" + i + "-1", nodeResources, Version.emptyVersion))
+                    .map(hostIndex -> {
+                        String hostHostname = "host-" + hostIndex;
+                        String hostIp = "::" + hostIndex + ":0";
+                        nameResolver.addRecord(hostHostname, hostIp);
+                        Set<String> pool = IntStream.range(1, numIps + 1).mapToObj(i -> {
+                            String ip = "::" + hostIndex + ":" + i;
+                            nameResolver.addRecord(hostHostname + "-" + i, ip);
+                            return ip;
+                        }).collect(Collectors.toSet());
+
+                        Node parent = Node.create(hostHostname, hostHostname, hostFlavor, Node.State.ready, NodeType.host)
+                                .ipConfig(Set.of(hostIp), pool).exclusiveTo(exclusiveTo).build();
+                        Node child = Node.createDockerNode(Set.of("::" + hostIndex + ":1"), hostHostname + "-1", hostHostname, nodeResources, NodeType.tenant).build();
+                        ProvisionedHost provisionedHost = mock(ProvisionedHost.class);
+                        when(provisionedHost.generateHost()).thenReturn(parent);
+                        when(provisionedHost.generateNode()).thenReturn(child);
+                        return provisionedHost;
+                    })
                     .collect(Collectors.toList());
         }).when(hostProvisioner).provisionHosts(any(), any(), any(), any());
     }
